@@ -3,36 +3,75 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Weather Model Viewer</title>
+    <title>AI Model Comparison</title>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 15px; max-width: 1600px; margin: 0 auto; }
-        .card { background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        img { width: 100%; border-radius: 4px; }
-        h3 { margin: 5px 0 10px; color: #333; }
+        body { font-family: system-ui, sans-serif; background: #f4f4f9; text-align: center; padding: 20px; }
+        .controls { background: white; padding: 15px; border-radius: 8px; display: inline-block; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        input[type=range] { width: 300px; margin: 0 10px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1400px; margin: 0 auto; }
+        .card { background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        img { width: 100%; border-radius: 4px; display: block; }
+        h2 { margin: 0 0 10px 0; font-size: 1.2rem; color: #333; }
+        .status { font-weight: bold; color: #007bff; margin-bottom: 5px; }
     </style>
 </head>
 <body>
-    <h1>Model Comparison (Northeast US)</h1>
-    <p>2m Temperature | Forecast Hour 24</p>
-    
+
+    <h1>AI Model Comparison (Northeast US)</h1>
+
+    <div class="controls">
+        <div class="status" id="time-label">Forecast Hour: 000</div>
+        <button onclick="changeHour(-6)">&#8592; Prev</button>
+        <input type="range" id="slider" min="0" max="48" step="6" value="0" oninput="updateImages(this.value)">
+        <button onclick="changeHour(6)">Next &#8594;</button>
+    </div>
+
     <div class="grid">
         <div class="card">
-            <h3>ECMWF AIFS (Deterministic)</h3>
-            <img src="output/ecmwf_aifs_det.png" onerror="this.src='https://placehold.co/600x400?text=Waiting+for+Data'">
+            <h2>ECMWF AIFS</h2>
+            <img id="img-ecmwf" src="output/ecmwf_aifs_f000.png" onerror="this.src='https://placehold.co/600x400?text=Data+Unavailable'">
         </div>
         <div class="card">
-            <h3>ECMWF AIFS (Ensemble Control)</h3>
-            <img src="output/ecmwf_aifs_ens_ctrl.png" onerror="this.src='https://placehold.co/600x400?text=Waiting+for+Data'">
-        </div>
-        <div class="card">
-            <h3>NOAA AIFS (Native AI)</h3>
-            <img src="output/noaa_aifs.png" onerror="this.src='https://placehold.co/600x400?text=Waiting+for+Data'">
-        </div>
-        <div class="card">
-            <h3>NOAA GEFS (Physics Control)</h3>
-            <img src="output/noaa_gefs_hybrid.png" onerror="this.src='https://placehold.co/600x400?text=Waiting+for+Data'">
+            <h2>NOAA AIGFS (GraphCast)</h2>
+            <img id="img-noaa" src="output/noaa_aigfs_f000.png" onerror="this.src='https://placehold.co/600x400?text=Data+Unavailable'">
         </div>
     </div>
+
+    <script>
+        const slider = document.getElementById('slider');
+        const label = document.getElementById('time-label');
+        const imgEcmwf = document.getElementById('img-ecmwf');
+        const imgNoaa = document.getElementById('img-noaa');
+
+        function updateImages(val) {
+            // Format hour to 3 digits (e.g., 0 -> 000, 6 -> 006)
+            const hour = String(val).padStart(3, '0');
+            
+            label.innerText = `Forecast Hour: ${hour}`;
+            
+            // Add timestamp to prevent browser caching
+            const ts = new Date().getTime();
+            imgEcmwf.src = `output/ecmwf_aifs_f${hour}.png?t=${ts}`;
+            imgNoaa.src = `output/noaa_aigfs_f${hour}.png?t=${ts}`;
+        }
+
+        function changeHour(delta) {
+            let current = parseInt(slider.value);
+            let next = current + delta;
+            if (next >= 0 && next <= 48) {
+                slider.value = next;
+                updateImages(next);
+            }
+        }
+        
+        // Load info if available
+        fetch('output/run_info.json')
+            .then(response => response.json())
+            .then(data => {
+                document.querySelector('h1').innerText += ` | Run: ${data.date} ${data.run}Z`;
+            })
+            .catch(err => console.log("Run info not found yet"));
+    </script>
+
 </body>
 </html>
