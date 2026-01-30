@@ -8,16 +8,14 @@ import cartopy.feature as cfeature
 import numpy as np
 
 # --- CONFIGURATION ---
-# Northeast US Sector
-EXTENT = [-82, -66, 37, 48] 
-
-# Directory to save images
+EXTENT = [-82, -66, 37, 48] # Northeast US
 OUTPUT_DIR = "output"
 
-def get_latest_run_time():
-    """Calculates the latest likely available run (00Z or 12Z)."""
+def get_run_times():
+    """Determines the target run date/cycle based on current UTC time."""
     now = datetime.datetime.utcnow()
-    # AIFS/AIGFS usually available 6 hours after run. 
+    
+    # Logic: Data usually available ~5-6 hours after run
     if now.hour >= 18:
         run = "12"
         date = now
@@ -27,14 +25,18 @@ def get_latest_run_time():
     else:
         run = "12"
         date = now - datetime.timedelta(days=1)
-    
+        
     return date.strftime("%Y%m%d"), run
 
 def download_file(url, local_filename):
-    """Helper to download a file with status printing."""
-    print(f"Attempting download: {url}")
+    """Robust downloader with timeout."""
+    if os.path.exists(local_filename):
+        print(f"File already exists: {local_filename}")
+        return True
+        
+    print(f"Attempting: {url}")
     try:
-        with requests.get(url, stream=True, timeout=30) as r:
+        with requests.get(url, stream=True, timeout=60) as r:
             if r.status_code == 200:
                 with open(local_filename, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
@@ -48,123 +50,156 @@ def download_file(url, local_filename):
         print(f"Error downloading {url}: {e}")
         return False
 
-def download_ecmwf_aifs(date, run, step="24"):
-    """Downloads ECMWF AIFS GRIB2 with fallback URLs."""
-    # Filename format: YYYYMMDDHH0000-step-oper-fc.grib2
-    # Note: Step is formatted as '24h' (no leading zero typically required for ECMWF Open Data)
+# --- DOWNLOADERS ---
+
+def download_ecmwf_aifs(date, run, step):
+    """ECMWF AIFS (Deterministic High-Res)."""
+    # Note: Using 'aifs-single' for deterministic
     filename = f"{date}{run}0000-{step}h-oper-fc.grib2"
-    local_file = f"ecmwf_aifs_{date}_{run}_{step}.grib2"
-
-    # Try Primary Source (ECMWF Data Portal) - Updated to 'aifs-single'
-    url1 = f"https://data.ecmwf.int/forecasts/{date}/{run}z/aifs-single/0p25/oper/{filename}"
+    local = f"ecmwf_aifs_det_{date}_{run}.grib2"
     
-    # Try Secondary Source (Azure Mirror) - Often more reliable for bots
-    url2 = f"https://ai4edataeuwest.blob.core.windows.net/ecmwf/{date}/{run}z/aifs-single/0p25/oper/{filename}"
+    # Try Azure Mirror first (faster/more reliable for bots)
+    url_azure = f"https://ai4edataeuwest.blob.core.windows.net/ecmwf/{date}/{run}z/aifs-single/0p25/oper/{filename}"
+    url_main = f"https://data.ecmwf.int/forecasts/{date}/{run}z/aifs-single/0p25/oper/{filename}"
+    
+    if download_file(url_azure, local): return local
+    if download_file(url_main, local): return local
+    return None
 
-    if download_file(url1, local_file):
-        return local_file
-    elif download_file(url2, local_file):
-        return local_file
-    else:
-        print("All ECMWF AIFS download attempts failed.")
-        return None
+def download_ecmwf_aifs_ens(date, run, step):
+    """ECMWF AIFS Ensemble (Control Member)."""
+    # Using 'aifs-ens' stream. We grab the Control (cf) to save bandwidth vs downloading 50 members.
+    filename = f"{date}{run}0000-{step}h-enfo-cf.grib2"
+    local = f"ecmwf_aifs_ens_ctrl_{date}_{run}.grib2"
+    
+    url_azure = f"https://ai4edataeuwest.blob.core.windows.net/ecmwf/{date}/{run}z/aifs-ens/0p25/enfo/{filename}"
+    
+    if download_file(url_azure, local): return local
+    return None
 
-def download_noaa_aigfs(date, run, step="24"):
-    """Downloads NOAA GraphCast/AIGFS GRIB2 from S3."""
-    # Padding step to 3 digits (e.g., 24 -> 024)
+def download_noaa_aifs(date, run, step):
+    """NOAA AIFS (The NOAA-developed AI model)."""
+    # Bucket: noaa-nws-aifs-pds
     step_padded = str(step).zfill(3)
+    # File pattern: aifs.t00z.pgrb2.0p25.f024
+    url = f"https://noaa-nws-aifs-pds.s3.amazonaws.com/aifs.{date}/{run}/aifs.t{run}z.pgrb2.0p25.f{step_padded}"
+    local = f"noaa_aifs_{date}_{run}.grib2"
     
-    # Bucket URL for GraphCast GFS
-    url = f"https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com/graphcastgfs.{date}/{run}/forecasts_13_levels/graphcastgfs.t{run}z.pgrb2.0p25.f{step_padded}"
-    
-    local_file = f"noaa_aigfs_{date}_{run}_{step}.grib2"
-    
-    if download_file(url, local_file):
-        return local_file
-    else:
-        return None
+    if download_file(url, local): return local
+    return None
 
-def plot_sector(file_path, model_name, date, run, step):
-    """Reads GRIB and plots the Northeast sector."""
-    if not os.path.exists(file_path):
+def download_gefs_hybrid(date, run, step):
+    """NOAA GEFS (Physics Ensemble - Control Member)."""
+    # Bucket: noaa-gefs-pds
+    # We download the control member (gec00) for a fair comparison with AI Controls
+    step_padded = str(step).zfill(3)
+    # File: gec00.t00z.pgrb2a.0p50.f024
+    url = f"https://noaa-gefs-pds.s3.amazonaws.com/gefs.{date}/{run}/atmos/pgrb2ap5/gec00.t{run}z.pgrb2a.0p50.f{step_padded}"
+    local = f"noaa_gefs_ctrl_{date}_{run}.grib2"
+    
+    if download_file(url, local): return local
+    return None
+
+def get_temp_var(ds):
+    """Helper to find temperature variable regardless of naming convention."""
+    # Priority: t2m (standard), 2t (ecmwf code), tmp (ncep sometimes)
+    if 't2m' in ds:
+        return ds['t2m']
+    elif '2t' in ds:
+        return ds['2t']
+    elif 'tmp' in ds: # Sometimes standard GFS uses 'tmp'
+        return ds['tmp']
+    else:
+        raise ValueError(f"Could not find temp variable. Available: {list(ds.keys())}")
+
+def plot_model(file_path, model_label, date, run, step):
+    if not file_path or not os.path.exists(file_path):
+        print(f"Skipping {model_label} (File not found)")
         return
 
     try:
-        print(f"Plotting {model_name}...")
+        print(f"Processing {model_label}...")
         
-        # Load Dataset
-        if model_name == "ECMWF-AIFS":
-            # Filter for 2m temperature (shortName '2t')
+        # Open Dataset with filter to speed up reading
+        # We try to filter for both common keys to ensure we get the data
+        try:
+            ds = xr.open_dataset(file_path, engine='cfgrib', 
+                                 backend_kwargs={'filter_by_keys': {'shortName': 't2m'}})
+        except:
+            # Fallback if t2m filter fails, try 2t
             ds = xr.open_dataset(file_path, engine='cfgrib', 
                                  backend_kwargs={'filter_by_keys': {'shortName': '2t'}})
-            data_var = ds['2t']
-            
-        elif model_name == "NOAA-AIGFS":
-            # GraphCast often uses 't2m' or '2t'
-            ds = xr.open_dataset(file_path, engine='cfgrib', 
-                                 backend_kwargs={'filter_by_keys': {'shortName': '2t'}})
-            data_var = ds['t2m']
 
-        # Convert Kelvin to Fahrenheit
-        data_f = ((data_var - 273.15) * 9/5) + 32
+        data_var = get_temp_var(ds)
+        
+        # Convert to Fahrenheit
+        # Check units: if > 200, assume Kelvin. If < 100, assume Celsius (unlikely in GRIB2)
+        if data_var.max() > 200:
+            data_f = ((data_var - 273.15) * 9/5) + 32
+        else:
+            data_f = (data_var * 9/5) + 32
 
-        # Setup Plot
-        fig = plt.figure(figsize=(12, 8))
+        # Plot
+        fig = plt.figure(figsize=(10, 8)) # Slightly smaller to save generation time
         ax = plt.axes(projection=ccrs.LambertConformal(central_longitude=-74, central_latitude=42))
         ax.set_extent(EXTENT, crs=ccrs.PlateCarree())
 
-        # Add Map Features
         ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=1)
         ax.add_feature(cfeature.STATES.with_scale('50m'), linewidth=0.5)
         ax.add_feature(cfeature.BORDERS, linewidth=1)
 
-        # Plot Data
         levels = np.arange(-20, 100, 2) 
         cmap = 'coolwarm'
         
-        plot = ax.contourf(data_f.longitude, data_f.latitude, data_f, levels=levels, 
-                           transform=ccrs.PlateCarree(), cmap=cmap, extend='both')
+        cf = ax.contourf(data_f.longitude, data_f.latitude, data_f, levels=levels, 
+                         transform=ccrs.PlateCarree(), cmap=cmap, extend='both')
         
-        cbar = plt.colorbar(plot, orientation='vertical', pad=0.02, shrink=0.8)
-        cbar.set_label("Temperature (°F)")
+        plt.colorbar(cf, orientation='vertical', pad=0.02, shrink=0.7, label="Temp (°F)")
 
         # Titles
-        valid_time = datetime.datetime.strptime(date, "%Y%m%d") + \
-                     datetime.timedelta(hours=int(run)) + \
-                     datetime.timedelta(hours=int(step))
-        
-        plt.title(f"{model_name} | 2m Temperature", loc='left', fontweight='bold', fontsize=12)
-        plt.title(f"Init: {date} {run}Z | Valid: {valid_time.strftime('%Y-%m-%d %H:%M')} (F{step})", loc='right', fontsize=10)
+        valid = datetime.datetime.strptime(date, "%Y%m%d") + datetime.timedelta(hours=int(run)+int(step))
+        plt.title(f"{model_label}", loc='left', fontweight='bold', fontsize=12)
+        plt.title(f"Init: {date} {run}Z | F{step}", loc='right', fontsize=10)
 
-        # Save Image
-        out_path = os.path.join(OUTPUT_DIR, f"{model_name.lower().replace('-', '_')}_temp_f{step}.png")
-        plt.savefig(out_path, bbox_inches='tight', dpi=150)
-        print(f"Saved plot to {out_path}")
-        plt.close()
+        # Output
+        safe_name = model_label.lower().replace(" ", "_").replace("-", "_")
+        out_path = os.path.join(OUTPUT_DIR, f"{safe_name}.png")
+        plt.savefig(out_path, bbox_inches='tight', dpi=100)
+        print(f"Generated: {out_path}")
         
+        ds.close()
+        plt.close()
+
     except Exception as e:
-        print(f"Error plotting {model_name}: {e}")
+        print(f"Error plotting {model_label}: {e}")
 
 def main():
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-
-    date, run = get_latest_run_time()
-    step = "24" # forecast hour
+    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
     
-    print(f"--- Starting Processing for {date} {run}Z (Step F{step}) ---")
+    date, run = get_run_times()
+    step = "24"
+    
+    print(f"--- RUNNING FOR {date} {run}Z ---")
 
-    # 1. ECMWF AIFS (Updated with fallback)
-    ecmwf_file = download_ecmwf_aifs(date, run, step)
-    if ecmwf_file:
-        plot_sector(ecmwf_file, "ECMWF-AIFS", date, run, step)
-        os.remove(ecmwf_file)
+    # 1. ECMWF AIFS (Deterministic)
+    f1 = download_ecmwf_aifs(date, run, step)
+    plot_model(f1, "ECMWF-AIFS-Det", date, run, step)
+    if f1: os.remove(f1)
 
-    # 2. NOAA AIGFS
-    noaa_file = download_noaa_aigfs(date, run, step)
-    if noaa_file:
-        plot_sector(noaa_file, "NOAA-AIGFS", date, run, step)
-        os.remove(noaa_file)
+    # 2. ECMWF AIFS (Ensemble Control)
+    f2 = download_ecmwf_aifs_ens(date, run, step)
+    plot_model(f2, "ECMWF-AIFS-Ens-Ctrl", date, run, step)
+    if f2: os.remove(f2)
+
+    # 3. NOAA AIFS (NOAA's AI Model)
+    f3 = download_noaa_aifs(date, run, step)
+    plot_model(f3, "NOAA-AIFS", date, run, step)
+    if f3: os.remove(f3)
+
+    # 4. NOAA GEFS (Hybrid/Physics Control)
+    f4 = download_gefs_hybrid(date, run, step)
+    plot_model(f4, "NOAA-GEFS-Hybrid", date, run, step)
+    if f4: os.remove(f4)
 
 if __name__ == "__main__":
     main()
