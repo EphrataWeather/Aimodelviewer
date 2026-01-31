@@ -1,44 +1,38 @@
-name: Update Model Viewer
+name: Update AI Weather Models
 
 on:
   schedule:
-    # Run at 05:00 and 17:00 UTC (approx when 00z/12z data is ready)
-    - cron: '0 5,17 * * *'
-  workflow_dispatch: # Allows manual trigger button
+    - cron: '0 6,18 * * *' # Run at 06:00 and 18:00 UTC
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-and-plot:
+  build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-    - name: Install System Dependencies (ecCodes)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libeccodes-dev
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes-dev
+          pip install requests xarray matplotlib cartopy numpy cfgrib aiohttp
 
-    - name: Install Python Libraries
-      run: |
-        pip install -r requirements.txt
+      - name: Run Model Script
+        run: python scripts/process_models.py
 
-    - name: Run Processing Script
-      run: |
-        python scripts/process_models.py
-
-    - name: Commit and Push Results
-      run: |
-        git config --global user.name 'ModelBot'
-        git config --global user.email 'bot@noreply.github.com'
-        git add output/*.png
-        git commit -m "Update model plots [skip ci]" || echo "No changes to commit"
-        git push
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/*
+          git commit -m "Update weather charts $(date -u)" || exit 0
+          git push
